@@ -42,6 +42,7 @@
 #include "super.h"
 #include "inode.h"
 #include "bdev.h"
+#include "tiering.h"
 
 int measure_timing;
 int metadata_csum;
@@ -169,56 +170,6 @@ static int nova_get_nvmm_info(struct super_block *sb,
 	return 0;
 }
 
-// TODO: Link with mount option
-static char *find_block_devices(void) {
-	return find_a_raw_bdev();
-}
-
-// TODO: more than one block device
-static int nova_get_bdev_info(struct nova_sb_info *sbi){
-	struct block_device *bdev_raw;
-	char *bdev_path = NULL;
-
-	struct gendisk*	bd_disk = NULL;
-	unsigned long nsector;
-
-	const fmode_t mode = FMODE_READ | FMODE_WRITE;
-	
-	sbi->bdev_list = kzalloc(sizeof(struct bdev_info), GFP_KERNEL);	
-	if (!sbi->bdev_list) return -ENOMEM;
-	bdev_path = find_block_devices();
-	if (!bdev_path) return -ENOENT;
-
-	bdev_raw = lookup_bdev(bdev_path);
-	if (IS_ERR(bdev_raw))
-	{
-		nova_info("bdev: error opening raw device <%lu>\n", PTR_ERR(bdev_raw));
-	}
-	if (!bdget(bdev_raw->bd_dev))
-	{
-		nova_info("bdev: error bdget()\n");
-	}
-	if (blkdev_get(bdev_raw, mode, NULL))
-	{
-		nova_info("bdev: error blkdev_get()\n");
-		bdput(bdev_raw);
-	}	
-
-	sbi->bdev_list->bdev_raw = bdev_raw;
-	strcat(sbi->bdev_list->bdev_path, bdev_path);
-
-	bd_disk = bdev_raw->bd_disk;
-	nsector = get_capacity(bd_disk);
-	sbi->bdev_list->major = bd_disk->major;
-	sbi->bdev_list->minors = bd_disk->minors;
-	sbi->bdev_list->capacity_sector = nsector;
-	sbi->bdev_list->capacity_page = nsector>>3;
-	strcat(sbi->bdev_list->bdev_name,bd_disk->disk_name);
-	nova_info("nova_get_bdev_info out\n");
-
-	return 0;
-}
-
 static loff_t nova_max_size(int bits)
 {
 	loff_t res;
@@ -234,7 +185,7 @@ static loff_t nova_max_size(int bits)
 
 enum {
 	Opt_bpi, Opt_init, Opt_snapshot, Opt_mode, Opt_uid,
-	Opt_gid, Opt_blocksize, Opt_wprotect,
+	Opt_gid, Opt_blocksize, Opt_wprotect, Opt_bdev, 
 	Opt_err_cont, Opt_err_panic, Opt_err_ro,
 	Opt_dbgmask, Opt_err
 };
@@ -247,12 +198,43 @@ static const match_table_t tokens = {
 	{ Opt_uid,	     "uid=%u"		  },
 	{ Opt_gid,	     "gid=%u"		  },
 	{ Opt_wprotect,	     "wprotect"		  },
+	{ Opt_bdev,	     "bdev=%s"		  },
 	{ Opt_err_cont,	     "errors=continue"	  },
 	{ Opt_err_panic,     "errors=panic"	  },
 	{ Opt_err_ro,	     "errors=remount-ro"  },
 	{ Opt_dbgmask,	     "dbgmask=%u"	  },
 	{ Opt_err,	     NULL		  },
 };
+
+static int nova_parse_tiering_options(char *options)
+{
+	char *p;
+	substring_t args[MAX_OPT_ARGS];
+
+	nova_reset_tiering();
+
+	if (!options)
+		return 0;
+
+	while ((p = strsep(&options, ",")) != NULL) {
+		int token;
+
+		if (!*p)
+			continue;
+
+		token = match_token(p, tokens, args);
+		if(token == Opt_bdev) {
+			bdev_paths[bdev_count] = match_strdup(args);
+			if (!bdev_paths[bdev_count]) {
+				return -EINVAL;
+			}
+			nova_info("NOVA: Tier %d is set to %s\n", bdev_count+2, bdev_paths[bdev_count]);
+			bdev_count++;
+		}
+	}
+
+	return 0;
+}
 
 static int nova_parse_options(char *options, struct nova_sb_info *sbi,
 			       bool remount)
@@ -659,7 +641,7 @@ static int nova_fill_super(struct super_block *sb, void *data, int silent)
 		return -ENOMEM;
 	}
 
-	sb->s_fs_info = sbi;
+	sb->s_fs_info = sbi; 
 	sbi->sb = sb;
 
 	set_default_opts(sbi);
@@ -669,8 +651,10 @@ static int nova_fill_super(struct super_block *sb, void *data, int silent)
 		nova_err(sb, "NOVA needs more log pointer pages to support more than "
 			  __stringify(MAX_CPUS) " cpus.\n");
 		goto out;
-	}
-
+	} 
+ 
+	nova_parse_tiering_options(data);
+	
 	retval = nova_get_nvmm_info(sb, sbi);
 	if (retval) {
 		nova_err(sb, "%s: Failed to get nvmm info.",
@@ -678,17 +662,9 @@ static int nova_fill_super(struct super_block *sb, void *data, int silent)
 		goto out;
 	}
 
-	// TODO: tiering option
-	retval = nova_get_bdev_info(sbi);
-	if (retval) {
-		nova_err(sb, "%s: Failed to get block device info.",
-			 __func__);
-		goto out;
-	}
-
-	print_a_bdev(sbi);
-	
-	bdev_test(sbi);
+	nova_setup_tiering(sbi);
+	nova_dbg("%s: dev vpmem, phys_addr 0x%llx, virt_addr %p, size %ld\n",
+		__func__, sbi->phys_addr, sbi->virt_addr, sbi->initsize);
 
 	nova_dbg("measure timing %d, metadata checksum %d, inplace update %d, wprotect %d, data checksum %d, data parity %d, DRAM checksum %d\n",
 		measure_timing, metadata_csum,
@@ -754,7 +730,7 @@ static int nova_fill_super(struct super_block *sb, void *data, int silent)
 			 __func__);
 		goto out;
 	}
-
+	
 	if (nova_alloc_block_free_lists(sb)) {
 		retval = -ENOMEM;
 		nova_err(sb, "%s: Failed to allocate block free lists.",
@@ -848,6 +824,8 @@ setup_sb:
 
 	nova_print_curr_epoch_id(sb);
 
+	nova_setup_tiering(sbi);
+
 	retval = 0;
 	NOVA_END_TIMING(mount_t, mount_time);
 	return retval;
@@ -860,9 +838,6 @@ out:
 
 	kfree(sbi->free_lists);
 	sbi->free_lists = NULL;
-
-	kfree(sbi->bdev_list);
-	sbi->bdev_list = NULL;
 
 	kfree(sbi->journal_locks);
 	sbi->journal_locks = NULL;
@@ -940,6 +915,9 @@ int nova_remount(struct super_block *sb, int *mntflags, char *data)
 	if (nova_parse_options(data, sbi, 1))
 		goto restore_opt;
 
+	if (nova_setup_tiering(sbi))
+		goto restore_opt;
+
 	sb->s_flags = (sb->s_flags & ~MS_POSIXACL) |
 		      ((sbi->s_mount_opt & NOVA_MOUNT_POSIX_ACL) ?
 		       MS_POSIXACL : 0);
@@ -983,7 +961,6 @@ static void nova_put_super(struct super_block *sb)
 	kfree(sbi->zero_parity);
 	nova_dbgmask = 0;
 	kfree(sbi->free_lists);
-	kfree(sbi->bdev_list);
 	kfree(sbi->journal_locks);
 
 	for (i = 0; i < sbi->cpus; i++) {
@@ -1259,10 +1236,15 @@ static int __init init_nova_fs(void)
 	if (rc)
 		goto out3;
 
+	rc = nova_init_tiering(1UL << 40);
+	if (rc)
+		goto out4;
+
 	nova_info("init out");
 	NOVA_END_TIMING(init_t, init_time);
 	return 0;
-
+out4:
+	nova_cleanup_tiering();
 out3:
 	destroy_snapshot_info_cache();
 out2:
@@ -1276,6 +1258,7 @@ static void __exit exit_nova_fs(void)
 {
 	unregister_filesystem(&nova_fs_type);
 	remove_proc_entry(proc_dirname, NULL);
+	nova_cleanup_tiering();
 	destroy_snapshot_info_cache();
 	destroy_inodecache();
 	destroy_rangenode_cache();
