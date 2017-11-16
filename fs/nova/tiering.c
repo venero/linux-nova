@@ -232,9 +232,8 @@ int nova_setup_tiering(struct nova_sb_info *sbi)
         print_a_bdev(&bdev_list[i]);
     }
 
-    printk(KERN_INFO "nova: vpmem starts at %016lx (%lu GB)\n", 
-        (unsigned long)vpmem, 
-        size >> 18);
+    printk(KERN_INFO "nova: vpmem starts at %016lx (%lu GB) (%lu MB)\n", 
+        (unsigned long)vpmem, size >> 18, size>>8);
     nova_total_size = (size <<= 12);
 
     if (size > 0) {

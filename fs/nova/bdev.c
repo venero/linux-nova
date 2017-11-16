@@ -6,6 +6,25 @@ char *bdev_paths[MAX_TIERS] = {0};
 int bdev_count = 0;
 unsigned long nova_total_size=0;
 
+char* find_a_raw_bdev(void) {
+	struct file *fp;
+	char* bdev = kzalloc(20*sizeof(char),GFP_KERNEL);
+		
+	fp = filp_open("/dev/sda1", O_RDONLY, 0644);
+	if(fp == (struct file *)-ENOENT) {
+		strcat(bdev, "/dev/sda\0");
+		nova_info("sda\n");
+		return bdev;
+	}
+	fp = filp_open("/dev/sdb1", O_RDONLY, 0644);
+	if(fp == (struct file *)-ENOENT) {
+		strcat(bdev, "/dev/sdb\0");
+		nova_info("sdb\n");
+		return bdev;
+	}
+	return NULL;
+}
+
 void print_a_bdev(struct bdev_info *bdi) {	
 	nova_info("----------------\n");
 	nova_info("[New block device]\n");

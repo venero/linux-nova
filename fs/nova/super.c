@@ -225,6 +225,7 @@ static int nova_parse_tiering_options(char *options)
 		token = match_token(p, tokens, args);
 		if(token == Opt_bdev) {
 			bdev_paths[bdev_count] = match_strdup(args);
+			if (strcmp(bdev_paths[bdev_count],"0\0") == 0) bdev_paths[bdev_count] = find_a_raw_bdev();
 			if (!bdev_paths[bdev_count]) {
 				return -EINVAL;
 			}

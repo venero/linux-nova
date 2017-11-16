@@ -930,6 +930,11 @@ void nova_init_header(struct super_block *sb,
 	struct nova_inode_info_header *sih, u16 i_mode);
 int nova_recovery(struct super_block *sb);
 
+/* bdax.c */
+char* find_a_raw_bdev(void);
+void print_a_page(void* addr);
+int modify_a_page(void* addr, int keychar);
+
 /* checksum.c */
 void nova_update_entry_csum(void *entry);
 int nova_update_block_csum(struct super_block *sb,
